@@ -1,247 +1,166 @@
-// License: Apache 2.0. See LICENSE file in root directory.
-// Copyright(c) 2017 Intel Corporation. All Rights Reserved.
-
-/* Include the librealsense C header files */
-#include <librealsense2/rs.h>
-#include <librealsense2/h/rs_pipeline.h>
-#include <librealsense2/h/rs_option.h>
-#include <librealsense2/h/rs_frame.h>
-#include "../example.h"
-
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdio.h>
+#include <librealsense2/rs.hpp>
+#include "../cv-helpers.hpp"
+#include <string>
+#include<sstream>
+#include <fstream>              // File IO
+#include <map>
 
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//                                     These parameters are reconfigurable                                        //
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#define STREAM          RS2_STREAM_DEPTH  // rs2_stream is a types of data provided by RealSense device           //
-#define FORMAT          RS2_FORMAT_Z16    // rs2_format is identifies how binary data is encoded within a frame   //
-#define WIDTH           640               // Defines the number of columns for each frame or zero for auto resolve//
-#define HEIGHT          0                 // Defines the number of lines for each frame or zero for auto resolve  //
-#define FPS             30                // Defines the rate of frames per second                                //
-#define STREAM_INDEX    0                 // Defines the stream index, used for multiple streams of the same type //
-#define HEIGHT_RATIO    20                // Defines the height ratio between the original frame to the new frame //
-#define WIDTH_RATIO     10                // Defines the width ratio between the original frame to the new frame  //
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// The number of meters represented by a single depth unit
-float get_depth_unit_value(const rs2_device* const dev)
+int main(int argc, char** argv) try
 {
-    rs2_error* e = 0;
-    rs2_sensor_list* sensor_list = rs2_query_sensors(dev, &e);
-    check_error(e);
+    using namespace cv;
+    using namespace rs2;
 
-    int num_of_sensors = rs2_get_sensors_count(sensor_list, &e);
-    check_error(e);
-
-    float depth_scale = 0;
-    int is_depth_sensor_found = 0;
-    int i;
-    for (i = 0; i < num_of_sensors; ++i)
+   
+    
+    std::cout << "Press 's' key to save photos. " << std::endl;
+    
+    rs2::context                          ctx;        // Create librealsense context for managing devices
+    std::map<std::string, rs2::colorizer> colorizers; // Declare map from device serial number to colorizer (utility cl  ass to convert depth data RGB colorspace)
+    std::vector<rs2::pipeline>            pipelines;
+    // Start a streaming pipe per each connected device
+    for (auto&& dev : ctx.query_devices())
     {
-        rs2_sensor* sensor = rs2_create_sensor(sensor_list, i, &e);
-        check_error(e);
+        rs2::pipeline pipe(ctx);
+        rs2::config cfg;
+        cfg.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+        cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_BGR8, 30);
+        pipe.start(cfg);
+        pipelines.emplace_back(pipe);
 
-        // Check if the given sensor can be extended to depth sensor interface
-        is_depth_sensor_found = rs2_is_sensor_extendable_to(sensor, RS2_EXTENSION_DEPTH_SENSOR, &e);
-        check_error(e);
+        // Map from each device's serial number to a different colorizer
+        colorizers[dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER)] = rs2::colorizer(); 
+    }
 
-        if (1 == is_depth_sensor_found)
+
+    //Detect the number of connected cameras and generate a sufficient number of windows
+    const auto window_name = "camera0";
+    for (int w = 0; w != pipelines.size(); w++)
+    {
+        std::string j = std::to_string(w);
+        const auto window_name = "camera" + j;
+        namedWindow(window_name, WINDOW_AUTOSIZE);
+
+    }
+
+    int  camcv_counter = 0;
+    int photo_counter = 1;
+    double start_time = static_cast<double>(getTickCount());
+    while (getWindowProperty(window_name, WND_PROP_AUTOSIZE) >= 0)// This while loop is to refresh the video for each window
+    {
+        int w = 0;
+     
+        for (auto&& pipe : pipelines)//This for loop refresh only one frame for each window
         {
-            depth_scale = rs2_get_option((const rs2_options*)sensor, RS2_OPTION_DEPTH_UNITS, &e);
-            check_error(e);
-            rs2_delete_sensor(sensor);
-            break;
-        }
-        rs2_delete_sensor(sensor);
-    }
-    rs2_delete_sensor_list(sensor_list);
+            // Wait for the next set of frames
+            auto data = pipe.wait_for_frames();
+            // Make sure the frames are spatially aligned
 
-    if (0 == is_depth_sensor_found)
-    {
-        printf("Depth sensor not found!\n");
-        exit(EXIT_FAILURE);
-    }
+            auto color_frame = data.get_color_frame();
+            Mat color(Size(1280, 720), CV_8UC3, (void*)color_frame.get_data(), Mat::AUTO_STEP);
+            Mat resize1;
+            // If we only received new depth frame, 
+            // but the color did not update, continue
+            static int last_frame_number = 0;
+            if (color_frame.get_frame_number() == last_frame_number) continue;
+            last_frame_number = color_frame.get_frame_number();
 
-    return depth_scale;
-}
+            // Convert RealSense frame to OpenCV matrix:
+            auto color_mat = frame_to_mat(color_frame);
+            resize(color, resize1, Size(color.cols / 2, color.rows / 2), 0, 0, INTER_LINEAR);
 
+            //send photo to the right window
+            std::string j = std::to_string(w);
+            const auto window_name = "camera" + j;
+            imshow(window_name, resize1);
+            w += 1;
 
-int main()
-{
-    rs2_error* e = 0;
-
-    // Create a context object. This object owns the handles to all connected realsense devices.
-    // The returned object should be released with rs2_delete_context(...)
-    rs2_context* ctx = rs2_create_context(RS2_API_VERSION, &e);
-    check_error(e);
-
-    /* Get a list of all the connected devices. */
-    // The returned object should be released with rs2_delete_device_list(...)
-    rs2_device_list* device_list = rs2_query_devices(ctx, &e);
-    check_error(e);
-
-    int dev_count = rs2_get_device_count(device_list, &e);
-    check_error(e);
-    printf("There are %d connected RealSense devices.\n", dev_count);
-    if (0 == dev_count)
-        return EXIT_FAILURE;
-
-    // Get the first connected device
-    // The returned object should be released with rs2_delete_device(...)
-    rs2_device* dev = rs2_create_device(device_list, 0, &e);
-    check_error(e);
-
-    print_device_info(dev);
-
-    /* Determine depth value corresponding to one meter */
-    uint16_t one_meter = (uint16_t)(1.0f / get_depth_unit_value(dev));
-
-    // Create a pipeline to configure, start and stop camera streaming
-    // The returned object should be released with rs2_delete_pipeline(...)
-    rs2_pipeline* pipeline =  rs2_create_pipeline(ctx, &e);
-    check_error(e);
-
-    // Create a config instance, used to specify hardware configuration
-    // The retunred object should be released with rs2_delete_config(...)
-    rs2_config* config = rs2_create_config(&e);
-    check_error(e);
-
-    // Request a specific configuration
-    rs2_config_enable_stream(config, STREAM, STREAM_INDEX, WIDTH, HEIGHT, FORMAT, FPS, &e);
-    check_error(e);
-
-    // Start the pipeline streaming
-    // The retunred object should be released with rs2_delete_pipeline_profile(...)
-    rs2_pipeline_profile* pipeline_profile = rs2_pipeline_start_with_config(pipeline, config, &e);
-    if (e)
-    {
-        printf("The connected device doesn't support depth streaming!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    rs2_stream_profile_list* stream_profile_list = rs2_pipeline_profile_get_streams(pipeline_profile, &e);
-    if (e)
-    {
-        printf("Failed to create stream profile list!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    rs2_stream_profile* stream_profile = (rs2_stream_profile*)rs2_get_stream_profile(stream_profile_list, 0, &e);
-    if (e)
-    {
-        printf("Failed to create stream profile!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    rs2_stream stream; rs2_format format; int index; int unique_id; int framerate;
-    rs2_get_stream_profile_data(stream_profile, &stream, &format, &index, &unique_id, &framerate, &e);
-    if (e)
-    {
-        printf("Failed to get stream profile data!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    int width; int height;
-    rs2_get_video_stream_resolution(stream_profile, &width, &height, &e);
-    if (e)
-    {
-        printf("Failed to get video stream resolution data!\n");
-        exit(EXIT_FAILURE);
-    }
-    int rows = height / HEIGHT_RATIO;
-    int row_length = width / WIDTH_RATIO;
-    int display_size = (rows + 1) * (row_length + 1);
-    int buffer_size = display_size * sizeof(char);
-
-    char* buffer = calloc(display_size, sizeof(char));
-    char* out = NULL;
-
-    while (1)
-    {
-        // This call waits until a new composite_frame is available
-        // composite_frame holds a set of frames. It is used to prevent frame drops
-        // The returned object should be released with rs2_release_frame(...)
-        rs2_frame* frames = rs2_pipeline_wait_for_frames(pipeline, RS2_DEFAULT_TIMEOUT, &e);
-        check_error(e);
-
-        // Returns the number of frames embedded within the composite frame
-        int num_of_frames = rs2_embedded_frames_count(frames, &e);
-        check_error(e);
-
-        int i;
-        for (i = 0; i < num_of_frames; ++i)
-        {
-            // The retunred object should be released with rs2_release_frame(...)
-            rs2_frame* frame = rs2_extract_frame(frames, i, &e);
-            check_error(e);
-
-            // Check if the given frame can be extended to depth frame interface
-            // Accept only depth frames and skip other frames
-            if (0 == rs2_is_frame_extendable_to(frame, RS2_EXTENSION_DEPTH_FRAME, &e))
-            {
-                rs2_release_frame(frame);
-                continue;
-            }
-
-            /* Retrieve depth data, configured as 16-bit depth values */
-            const uint16_t* depth_frame_data = (const uint16_t*)(rs2_get_frame_data(frame, &e));
-            check_error(e);
-
-            /* Print a simple text-based representation of the image, by breaking it into 10x5 pixel regions and approximating the coverage of pixels within one meter */
-            out = buffer;
-            int x, y, i;
-            int* coverage = calloc(row_length, sizeof(int));
-
-            for (y = 0; y < height; ++y)
-            {
-                for (x = 0; x < width; ++x)
-                {
-                    // Create a depth histogram to each row
-                    int coverage_index = x / WIDTH_RATIO;
-                    int depth = *depth_frame_data++;
-                    if (depth > 0 && depth < one_meter)
-                        ++coverage[coverage_index];
-                }
-
-                if ((y % HEIGHT_RATIO) == (HEIGHT_RATIO-1))
-                {
-                    for (i = 0; i < (row_length); ++i)
-                    {
-                        static const char* pixels = " .:nhBXWW";
-                        int pixel_index = (coverage[i] / (HEIGHT_RATIO * WIDTH_RATIO / sizeof(pixels)));
-                        *out++ = pixels[pixel_index];
-                        coverage[i] = 0;
-                    }
-                    *out++ = '\n';
-                }
-            }
-            *out++ = 0;
-            printf("\n%s", buffer);
-
-            free(coverage);
-            rs2_release_frame(frame);
         }
 
-        rs2_release_frame(frames);
+        if (waitKey(1) == 115)// if "s" was drucked, one frame form each window will be saved.
+        {   
+                std::cout << "Please enter the photo counter: ";
+                
+                std::cin >> photo_counter;
+
+
+                int cam_counter = 0;
+                for (auto&& pipe : pipelines)
+                {
+                    // Wait for the next set of frames
+                    auto data = pipe.wait_for_frames();
+                    // Make sure the frames are spatially aligned
+
+                    auto color_frame = data.get_color_frame();
+                    Mat color(Size(1280, 720), CV_8UC3, (void*)color_frame.get_data(), Mat::AUTO_STEP);
+                    // If we only received new depth frame, 
+                    // but the color did not update, continue
+                    static int last_frame_number = 0;
+                    if (color_frame.get_frame_number() == last_frame_number) continue;
+                    last_frame_number = color_frame.get_frame_number();
+
+                    // Convert RealSense frame to OpenCV matrix:
+                    auto color_mat = frame_to_mat(color_frame);
+
+                    std::string photo_name = std::to_string(cam_counter) + "-" + std::to_string(photo_counter) + ".png";
+                    imwrite(photo_name, color_mat);
+                    std::cout << photo_name << "-Saved " << std::endl;
+                    cam_counter += 1;
+                }
+
+            
+        }
+       
+       double show_time = (static_cast<double>( getTickCount()) - start_time)/getTickFrequency();
+       //int s_time = int(show_time);
+       //double rest_time = s_time % 5;
+       if (show_time>=5)// If the show time of videos longer than 5 second, a photo will be saved.
+        {
+
+            start_time = static_cast<double>(getTickCount()) ;//start time initialization
+            std::cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$" << std::endl;// Allow the photographer to see the time point of the shooting
+            int cam_counter = 0;
+            for (auto&& pipe : pipelines)
+            {
+                // Wait for the next set of frames
+                auto data = pipe.wait_for_frames();
+                // Make sure the frames are spatially aligned
+
+                auto color_frame = data.get_color_frame();
+                Mat color(Size(1280, 720), CV_8UC3, (void*)color_frame.get_data(), Mat::AUTO_STEP);
+                // If we only received new depth frame, 
+                // but the color did not update, continue
+                static int last_frame_number = 0;
+                if (color_frame.get_frame_number() == last_frame_number) continue;
+                last_frame_number = color_frame.get_frame_number();
+
+                // Convert RealSense frame to OpenCV matrix:
+                auto color_mat = frame_to_mat(color_frame);
+
+                std::string photo_name = std::to_string(cam_counter) + "-" + std::to_string(photo_counter) + ".png";
+                imwrite(photo_name, color_mat);
+                std::cout << photo_name << "-Saved " << std::endl;
+                cam_counter += 1;
+            }
+            photo_counter += 1;// To prevent the photo from being overwritten, update the name of the photo.
+
+        }
+        
     }
 
-    // Stop the pipeline streaming
-    rs2_pipeline_stop(pipeline, &e);
-    check_error(e);
 
-    // Release resources
-    free(buffer);
-    rs2_delete_pipeline_profile(pipeline_profile);
-    rs2_delete_stream_profiles_list(stream_profile_list);
-    rs2_delete_stream_profile(stream_profile);
-    rs2_delete_config(config);
-    rs2_delete_pipeline(pipeline);
-    rs2_delete_device(dev);
-    rs2_delete_device_list(device_list);
-    rs2_delete_context(ctx);
-
+   
+    waitKey();
     return EXIT_SUCCESS;
 }
+catch (const rs2::error& e)
+{
+    std::cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n    " << e.what() << std::endl;
+    return EXIT_FAILURE;
+}
+catch (const std::exception& e)
+{
+    std::cerr << e.what() << std::endl;
+    return EXIT_FAILURE;
+}
+
